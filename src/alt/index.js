@@ -32,13 +32,17 @@ const {
 
 const ACTIONS_REGISTRY = Symbol()
 
+function dispatchIdentity(x, ...a) {
+  this.dispatch(a.length ? [x].concat(a) : x)
+}
+
 class Alt {
   constructor(config = {}) {
     this.config = config
     this.serialize = config.serialize || JSON.stringify
     this.deserialize = config.deserialize || JSON.parse
     this.dispatcher = config.dispatcher || new Dispatcher()
-    this.actions = {}
+    this.actions = { single: {} }
     this.stores = {}
     this.storeTransforms = config.storeTransforms || []
     this[ACTIONS_REGISTRY] = {}
@@ -89,15 +93,17 @@ class Alt {
   }
 
   generateActions(...actionNames) {
-    return this.createActions(function () {
-      this.generateActions(...actionNames)
-    })
+    const actions = { name: 'single' }
+    return this.createActions(actionNames.reduce((obj, action) => {
+      obj[action] = dispatchIdentity
+      return obj
+    }, actions))
   }
 
   createAction(name, implementation, obj) {
-    const actionId = uid(this[ACTIONS_REGISTRY], `Alt.${name}`)
+    const actionId = uid(this[ACTIONS_REGISTRY], name)
     this[ACTIONS_REGISTRY][actionId] = 1
-    const actionName = Symbol.for(actionId)
+    const actionName = Symbol.for(`alt/${actionId}`)
 
     // Wrap the action so we can provide a dispatch method
     const newAction = new AltAction(this, actionName, implementation, obj)
@@ -109,12 +115,16 @@ class Alt {
       })
     }
     action[ACTION_KEY] = actionName
-    return action
+    action.id = actionId
+    return (this.actions.single[actionId] = action)
   }
 
   createActions(ActionsClass, exportObj = {}, ...argsForConstructor) {
     const actions = {}
-    const key = ActionsClass.displayName || ActionsClass.name || ''
+    const key = uid(
+      this[ACTIONS_REGISTRY],
+      ActionsClass.displayName || ActionsClass.name || 'Unknown'
+    )
 
     if (typeof ActionsClass === 'function') {
       assign(actions, getInternalMethods(ActionsClass.prototype, true))
@@ -125,10 +135,7 @@ class Alt {
 
         generateActions(...actionNames) {
           actionNames.forEach((actionName) => {
-            // This is a function so we can later bind this to AltAction
-            actions[actionName] = function (x, ...a) {
-              this.dispatch(a.length ? [x].concat(a) : x)
-            }
+            actions[actionName] = dispatchIdentity
           })
         }
       }
@@ -138,10 +145,28 @@ class Alt {
       assign(actions, ActionsClass)
     }
 
+    this.actions[key] = this.actions[key] || {}
+
     return Object.keys(actions).reduce((obj, action) => {
-      obj[action] = this.createAction(`${key}#${action}`, actions[action], obj)
+      if (typeof actions[action] !== 'function') {
+        return obj
+      }
+
+      // create the action
+      const name = `${key}#${action}`
+      obj[action] = this.createAction(name, actions[action], obj)
+
+      // remove the action referenced in single
+      delete this.actions.single[obj[action].id]
+
+      // add namespaced action
+      const id = uid(this.actions[key], action)
+      this.actions[key][id] = obj[action]
+
+      // create a constant
       const constant = formatAsConstant(action)
       obj[constant] = obj[action][ACTION_KEY]
+
       return obj
     }, exportObj)
   }
